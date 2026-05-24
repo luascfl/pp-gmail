@@ -1,0 +1,22 @@
+# Binaries
+gmail-pp-cli
+gmail-pp-mcp
+build/
+bin/
+
+# Logs and PIDs
+*.log
+*.pid
+
+# Data and Artifacts
+*.json
+*.db
+*.pem
+*.pfx
+*.crt
+*.key
+renewal-email.txt
+
+# Config
+config.toml
+token.json
