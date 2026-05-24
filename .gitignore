@@ -20,3 +20,21 @@ renewal-email.txt
 # Config
 config.toml
 token.json
+.env
+*.env.local
+*.env.development
+*.env.production
+__pycache__/
+pycache
+.gemini
+GITHUB_TOKEN
+GITHUB_TOKEN.txt
+AMO_API_KEY.txt
+AMO_API_SECRET.txt
+gemini-gcloud-key.json
+gcp-oauth.keys.json
+*API*
+.eslintcache/
+node_modules/
+dist/
+*.zip
