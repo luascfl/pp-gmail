@@ -38,3 +38,6 @@ gcp-oauth.keys.json
 node_modules/
 dist/
 *.zip
+
+# local build artifact
+/pp-gmail
