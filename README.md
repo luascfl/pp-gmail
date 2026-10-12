@@ -106,11 +106,11 @@ gmail-pp-cli drafts send-confirm draft_123 --confirm HASH --json
 ```
 
 ## Unique Features
-
 These capabilities aren't available in any other tool for this API.
-- **`drafts compose-safe`** — Create a Gmail draft from explicit recipients, subject, and body input while showing a deterministic preview and refusing secret-looking attachments by default.
-- **`drafts send-confirm`** — Send an existing draft only when the caller supplies a confirmation hash derived from the draft ID and MIME content preview.
-- **`drafts preview-hash`** — Render the RFC 2822 MIME preview and base64URL payload metadata without calling Gmail, then output the confirmation hash used by send-confirm.
+
+- **`drafts compose-safe`** — Create a Gmail draft from explicit recipients, subject, and body input, then re-read the saved Gmail draft and return the canonical `confirmation_hash` for sending.
+- **`drafts send-confirm`** — Send an existing draft only when the caller supplies the canonical confirmation hash derived from the saved Gmail draft.
+- **`drafts preview-hash`** — Re-read a saved Gmail draft, render the RFC 2822 MIME preview metadata, and output the canonical confirmation hash used by send-confirm.
 - **`drafts policy-check`** — Inspect a draft request for risky recipients, missing subject, secret-looking attachment extensions, and accidental inclusion of certificate or key material before draft creation.
 
 ## Recipes
@@ -121,6 +121,8 @@ These capabilities aren't available in any other tool for this API.
 ```bash
 gmail-pp-cli drafts compose-safe --to person@example.com --subject 'Review request' --body 'Please review this draft.' --json
 ```
+
+`compose-safe` returns a `preflight_hash` for the locally generated MIME and a `confirmation_hash` recalculated from the saved Gmail draft. Use the returned `confirmation_hash` with `send-confirm`; Gmail may normalize headers and MIME boundaries after creation.
 
 ### Verify a draft before sending
 

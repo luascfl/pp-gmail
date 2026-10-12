@@ -50,7 +50,13 @@ type draftPreview struct {
 	Allowed          bool               `json:"allowed"`
 	RawSize          int                `json:"raw_size,omitempty"`
 	MIMEHash         string             `json:"mime_hash,omitempty"`
+	PreflightHash    string             `json:"preflight_hash,omitempty"`
 	ConfirmationHash string             `json:"confirmation_hash,omitempty"`
+	HashSource       string             `json:"hash_source,omitempty"`
+	ProvidedHash     string             `json:"provided_hash,omitempty"`
+	ExpectedHash     string             `json:"expected_hash,omitempty"`
+	ErrorCode        string             `json:"error,omitempty"`
+	Hint             string             `json:"hint,omitempty"`
 	DryRun           bool               `json:"dry_run,omitempty"`
 	Created          bool               `json:"created,omitempty"`
 	Sent             bool               `json:"sent,omitempty"`
@@ -66,6 +72,9 @@ func newDraftsComposeSafeCmd(flags *rootFlags) *cobra.Command {
 	var subject string
 	var body string
 	var bodyFile string
+	var threadId string
+	var inReplyTo string
+	var references string
 
 	cmd := &cobra.Command{
 		Use:     "compose-safe",
@@ -102,6 +111,36 @@ func newDraftsComposeSafeCmd(flags *rootFlags) *cobra.Command {
 				if _, err := mail.ParseAddress(from); err != nil {
 					return usageErr(fmt.Errorf("invalid --from address: %w", err))
 				}
+
+				c, err := flags.newClient()
+				if err != nil {
+					return fmt.Errorf("failed to authorize for sendAs check: %w", err)
+				}
+				data, err := c.Get(cmd.Context(), "/gmail/v1/users/me/settings/sendAs", nil)
+				if err != nil {
+					return fmt.Errorf("failed to fetch sendAs aliases: %w", err)
+				}
+
+				// We can parse the json dynamically or use types.
+				var sendAsResp struct {
+					SendAs []struct {
+						SendAsEmail string `json:"sendAsEmail"`
+					} `json:"sendAs"`
+				}
+				if err := json.Unmarshal(data, &sendAsResp); err != nil {
+					return fmt.Errorf("failed to parse sendAs response: %w", err)
+				}
+
+				authorized := false
+				for _, alias := range sendAsResp.SendAs {
+					if strings.EqualFold(alias.SendAsEmail, from) {
+						authorized = true
+						break
+					}
+				}
+				if !authorized {
+					return usageErr(fmt.Errorf("unauthorized --from address: %q is not a valid sendAs alias for this profile", from))
+				}
 			}
 			preview := draftPreview{
 				To:          normalizedTo,
@@ -121,14 +160,17 @@ func newDraftsComposeSafeCmd(flags *rootFlags) *cobra.Command {
 				return usageErr(fmt.Errorf("draft policy check failed; run `gmail-pp-cli drafts policy-check` for details"))
 			}
 
-			mimeBytes, err := buildDraftMIME(from, normalizedTo, normalizedCc, normalizedBcc, subject, bodyText, attachments)
+			mimeBytes, err := buildDraftMIME(from, normalizedTo, normalizedCc, normalizedBcc, subject, bodyText, attachments, inReplyTo, references)
 			if err != nil {
 				return err
 			}
 			raw := base64.RawURLEncoding.EncodeToString(mimeBytes)
 			preview.RawSize = len(raw)
 			preview.MIMEHash = hashString(raw)
-			preview.ConfirmationHash = confirmationHash("", raw)
+			preview.PreflightHash = confirmationHash("", raw)
+			preview.ConfirmationHash = preview.PreflightHash
+			preview.HashSource = "preflight_mime"
+			preview.Hint = "Dry-run hashes are preflight-only. Create the draft to receive the saved Gmail draft confirmation_hash."
 			preview.DryRun = flags.dryRun
 
 			if flags.dryRun {
@@ -143,7 +185,11 @@ func newDraftsComposeSafeCmd(flags *rootFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			payload := map[string]any{"message": map[string]any{"raw": raw}}
+			msgPayload := map[string]any{"raw": raw}
+			if threadId != "" {
+				msgPayload["threadId"] = threadId
+			}
+			payload := map[string]any{"message": msgPayload}
 			data, statusCode, err := c.PostWithParams(cmd.Context(), "/gmail/v1/users/me/drafts", map[string]string{}, payload)
 			if err != nil {
 				return classifyAPIError(err, flags)
@@ -157,7 +203,21 @@ func newDraftsComposeSafeCmd(flags *rootFlags) *cobra.Command {
 			}
 			if err := json.Unmarshal(data, &draftResp); err == nil && draftResp.ID != "" {
 				preview.DraftID = draftResp.ID
-				preview.ConfirmationHash = confirmationHash(draftResp.ID, raw)
+				preview.PreflightHash = confirmationHash(draftResp.ID, raw)
+				preview.ConfirmationHash = preview.PreflightHash
+				if savedRaw, savedData, err := fetchDraftRaw(cmd.Context(), c, draftResp.ID); err == nil {
+					preview.RawSize = len(savedRaw)
+					preview.MIMEHash = hashString(savedRaw)
+					preview.ConfirmationHash = confirmationHash(draftResp.ID, savedRaw)
+					preview.HashSource = "saved_gmail_draft"
+					preview.Hint = "Use this confirmation_hash with drafts send-confirm. It was recalculated from the saved Gmail draft after Gmail normalized the MIME."
+					if len(savedData) > 0 {
+						data = savedData
+					}
+				} else {
+					preview.HashSource = "preflight_mime"
+					preview.Hint = "Could not re-read the saved Gmail draft. Run drafts preview-hash before send-confirm to get the canonical confirmation_hash."
+				}
 			}
 			if err := json.Unmarshal(data, &preview.Data); err != nil {
 				preview.Data = json.RawMessage(data)
@@ -174,6 +234,9 @@ func newDraftsComposeSafeCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().StringSliceVar(&bcc, "bcc", nil, "BCC recipient email address(es)")
 	cmd.Flags().StringSliceVar(&attach, "attach", nil, "Attachment file path(s)")
 	cmd.Flags().StringVar(&from, "from", "", "Optional From address override")
+	cmd.Flags().StringVar(&threadId, "thread-id", "", "The ID of the thread the draft belongs to (for replying)")
+	cmd.Flags().StringVar(&inReplyTo, "in-reply-to", "", "The Message-ID this draft is replying to")
+	cmd.Flags().StringVar(&references, "references", "", "The References header for this draft")
 	cmd.Flags().StringVar(&subject, "subject", "", "Draft subject")
 	cmd.Flags().StringVar(&body, "body", "", "Draft body text")
 	cmd.Flags().StringVar(&bodyFile, "body-file", "", "Path to a text file containing the draft body")
@@ -267,6 +330,8 @@ func newDraftsPreviewHashCmd(flags *rootFlags) *cobra.Command {
 			preview.RawSize = len(raw)
 			preview.MIMEHash = hashString(raw)
 			preview.ConfirmationHash = confirmationHash(draftID, raw)
+			preview.HashSource = "saved_gmail_draft"
+			preview.Hint = "Use this confirmation_hash with drafts send-confirm."
 			preview.Allowed = true
 			if err := json.Unmarshal(data, &preview.Data); err != nil {
 				preview.Data = json.RawMessage(data)
@@ -300,19 +365,25 @@ func newDraftsSendConfirmCmd(flags *rootFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, _, err = fetchDraftRaw(cmd.Context(), c, draftID)
+			raw, _, err := fetchDraftRaw(cmd.Context(), c, draftID)
 			if err != nil {
 				return classifyAPIError(err, flags)
 			}
-			// Use our previously generated MIME hash to keep it stable
-			expected := confirmationHash(draftID, "")
+			expected := confirmationHash(draftID, raw)
+			preview.MIMEHash = hashString(raw)
+			preview.RawSize = len(raw)
 			preview.ConfirmationHash = expected
+			preview.ExpectedHash = expected
+			preview.ProvidedHash = confirm
+			preview.HashSource = "saved_gmail_draft"
 			if confirm != expected {
 				preview.Allowed = false
+				preview.ErrorCode = "confirmation_hash_mismatch"
+				preview.Hint = "Gmail may normalize MIME after draft creation. Run `gmail-pp-cli drafts preview-hash " + draftID + " --json` and resend with the returned confirmation_hash."
 				if flags.asJSON {
 					_ = printJSONFiltered(cmd.OutOrStdout(), preview, flags)
 				}
-				return usageErr(fmt.Errorf("confirmation hash mismatch"))
+				return usageErr(fmt.Errorf("confirmation hash mismatch: run `gmail-pp-cli drafts preview-hash %s --json` and retry with the returned confirmation_hash", draftID))
 			}
 			payload := map[string]any{"id": draftID}
 			data, statusCode, err := c.PostWithParams(cmd.Context(), "/gmail/v1/users/me/drafts/send", map[string]string{}, payload)
@@ -448,11 +519,17 @@ func previewText(s string, limit int) string {
 	return s[:limit] + "…"
 }
 
-func buildDraftMIME(from string, to, cc, bcc []string, subject, body string, attachments []draftAttachment) ([]byte, error) {
+func buildDraftMIME(from string, to, cc, bcc []string, subject, body string, attachments []draftAttachment, inReplyTo, references string) ([]byte, error) {
 	var buf bytes.Buffer
 	headers := []string{}
 	if from != "" {
 		headers = append(headers, "From: "+from)
+	}
+	if inReplyTo != "" {
+		headers = append(headers, "In-Reply-To: "+inReplyTo)
+	}
+	if references != "" {
+		headers = append(headers, "References: "+references)
 	}
 	if len(to) > 0 {
 		headers = append(headers, "To: "+strings.Join(to, ", "))

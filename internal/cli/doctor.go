@@ -6,6 +6,7 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -253,15 +254,32 @@ func newDoctorCmd(flags *rootFlags) *cobra.Command {
 					// Step 2: Validate credentials with an authenticated probe.
 					authHeader := cfg.AuthHeader()
 					if authHeader == "" {
-						// No auth configured — skip credential validation
 					} else if reachErr != nil && !errors.As(reachErr, &reachAPIErr) {
 						report["credentials"] = "skipped (API unreachable)"
 					} else {
-						suggestion := suggestReadCommand(cmd.Root())
-						if suggestion != "" {
-							report["credentials"] = fmt.Sprintf("present, not verified. Run `%s %s` to confirm the token works end-to-end.", "gmail-pp-cli", suggestion)
+						probeBody, probeErr := c.Get(cmd.Context(), "/gmail/v1/users/me/profile", nil)
+						var apiErr *client.APIError
+						if probeErr != nil {
+							if errors.As(probeErr, &apiErr) {
+								if apiErr.StatusCode == 401 {
+									report["credentials"] = "invalid or expired token (HTTP 401). Relogin required."
+								} else if apiErr.StatusCode == 403 && strings.Contains(string(apiErr.Body), "insufficientPermissions") {
+									report["credentials"] = "insufficient OAuth scopes (HTTP 403). Relogin required."
+								} else {
+									report["credentials"] = fmt.Sprintf("API error during probe (HTTP %d): %s", apiErr.StatusCode, apiErr.Body)
+								}
+							} else {
+								report["credentials"] = fmt.Sprintf("error during probe: %s", probeErr)
+							}
 						} else {
-							report["credentials"] = "present, not verified. Run any read command to confirm the token works end-to-end."
+							var profileResp struct {
+								EmailAddress string `json:"emailAddress"`
+							}
+							if err := json.Unmarshal(probeBody, &profileResp); err == nil && profileResp.EmailAddress != "" {
+								report["credentials"] = fmt.Sprintf("verified and working (authorized as %s)", profileResp.EmailAddress)
+							} else {
+								report["credentials"] = "verified and working"
+							}
 						}
 					}
 				}

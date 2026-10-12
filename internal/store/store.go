@@ -837,13 +837,14 @@ func (s *Store) Search(query string, limit int) ([]json.RawMessage, error) {
 	if limit <= 0 {
 		limit = 50
 	}
+	escapedQuery := `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
 	rows, err := s.db.Query(
 		`SELECT r.data FROM resources r
 		 JOIN resources_fts f ON r.id = f.id AND r.resource_type = f.resource_type
 		 WHERE resources_fts MATCH ?
 		 ORDER BY rank
 		 LIMIT ?`,
-		query, limit,
+		escapedQuery, limit,
 	)
 	if err != nil {
 		return nil, err
